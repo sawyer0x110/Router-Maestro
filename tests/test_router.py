@@ -17,11 +17,13 @@ class MockProvider(BaseProvider):
         authenticated: bool = True,
         models: list[ModelInfo] | None = None,
         fail_on_request: bool = False,
+        fail_on_list_models: bool = False,
     ):
         self._name = name
         self._authenticated = authenticated
         self._models = models or [ModelInfo(id="test-model", name="Test Model", provider=name)]
         self._fail_on_request = fail_on_request
+        self._fail_on_list_models = fail_on_list_models
 
     @property
     def name(self) -> str:
@@ -52,6 +54,13 @@ class MockProvider(BaseProvider):
         )
 
     async def list_models(self) -> list[ModelInfo]:
+        if self._fail_on_list_models:
+            raise ProviderError(
+                "Mock catalog failure",
+                status_code=502,
+                retryable=True,
+                provider=self._name,
+            )
         return self._models
 
 
@@ -92,6 +101,27 @@ class TestRouterModelResolution:
         provider, model = router_with_mock._parse_model_key("custom/org/model-name")
         assert provider == "custom"
         assert model == "org/model-name"
+
+    async def test_catalog_failure_does_not_pin_empty_cache(self, router_with_mock):
+        # A transient provider catalog failure (e.g. Copilot token-refresh 502)
+        # must not mark the cache fresh — otherwise every request 404s with
+        # "Model not found in any provider" for a full TTL window.
+        router_with_mock._ensure_providers_fresh = lambda: None
+        router_with_mock.providers = {
+            "mock": MockProvider(name="mock", fail_on_list_models=True)
+        }
+        await router_with_mock._ensure_models_cache()
+
+        assert router_with_mock._models_cache == {}
+        assert not router_with_mock._models_cache_ttl.is_valid  # next request retries
+
+    async def test_catalog_success_marks_cache_fresh(self, router_with_mock):
+        router_with_mock._ensure_providers_fresh = lambda: None
+        router_with_mock.providers = {"mock": MockProvider(name="mock")}
+        await router_with_mock._ensure_models_cache()
+
+        assert router_with_mock._models_cache  # populated
+        assert router_with_mock._models_cache_ttl.is_valid
 
 
 class TestRouterChatRequest:

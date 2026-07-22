@@ -676,6 +676,7 @@ class Router:
             self._fuzzy_cache.clear()
 
         logger.debug("Initializing models cache")
+        refresh_had_failure = False
         for provider_name, provider in self.providers.items():
             if provider.is_authenticated():
                 try:
@@ -721,6 +722,7 @@ class Router:
                             self._models_cache[ref.upstream_id] = entry
                     logger.debug("Cached %d models from %s", len(models), provider_name)
                 except ProviderError as e:
+                    refresh_had_failure = True
                     logger.warning(
                         "model_catalog_failed provider=%s kind=%s retryable=%s",
                         provider_name,
@@ -729,7 +731,14 @@ class Router:
                     )
                     continue
 
-        self._models_cache_ttl.set(True)
+        # Only mark the cache fresh when every authenticated provider populated
+        # its models. If a provider's catalog fetch failed (e.g. a transient
+        # Copilot token-refresh 502), leaving the TTL invalid lets the next
+        # request retry immediately instead of pinning an empty/partial cache —
+        # which otherwise surfaces as "Model not found in any provider" 404s for
+        # a full TTL window.
+        if not refresh_had_failure:
+            self._models_cache_ttl.set(True)
         logger.info("Models cache initialized with %d entries", len(self._models_cache))
 
         self._apply_model_overrides()
